@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using System.Data.Common;
+using System.Text.Json;
 using Schuly.Infrastructure.Vault;
 using Schuly.Plugin.Abstractions;
 using Schuly.Plugin.Schulware.Data;
@@ -58,7 +60,100 @@ namespace Schuly.Plugin.Schulware
         {
             using var scope = serviceProvider.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<SchulwareDbContext>();
+            await PreserveLegacySecretsAsync(
+                db,
+                scope.ServiceProvider.GetRequiredKeyedService<IPluginVault>(PluginName),
+                cancellationToken);
             await db.Database.MigrateAsync(cancellationToken);
+        }
+
+        private static async Task PreserveLegacySecretsAsync(
+            SchulwareDbContext db,
+            IPluginVault vault,
+            CancellationToken cancellationToken)
+        {
+            await db.Database.OpenConnectionAsync(cancellationToken);
+            try
+            {
+                var connection = db.Database.GetDbConnection();
+                var columns = new HashSet<string>(StringComparer.Ordinal);
+                await using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = """
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_schema = current_schema() AND table_name = 'Accounts'
+                        """;
+                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    while (await reader.ReadAsync(cancellationToken))
+                        columns.Add(reader.GetString(0));
+                }
+
+                if (!columns.Contains("Id"))
+                    return; // Fresh plugin database; EF creates the table below.
+
+                string[] legacyColumns =
+                [
+                    "MobileAccessToken", "MobileRefreshToken", "WebSessionId",
+                    "WebSessionUserId", "WebSessionTransId", "ContextStateJson", "UserAgent"
+                ];
+                var selectedColumns = legacyColumns
+                    .Select(column => columns.Contains(column)
+                        ? $"\"{column}\""
+                        : $"NULL AS \"{column}\"");
+
+                await using var readAccounts = connection.CreateCommand();
+                readAccounts.CommandText = $"SELECT \"Id\", {string.Join(", ", selectedColumns)} FROM \"Accounts\"";
+                await using var accounts = await readAccounts.ExecuteReaderAsync(cancellationToken);
+                while (await accounts.ReadAsync(cancellationToken))
+                {
+                    var id = accounts.GetGuid(0);
+                    var secrets = new LegacySecrets(
+                        ReadString(accounts, "MobileAccessToken"),
+                        ReadString(accounts, "MobileRefreshToken"),
+                        ReadString(accounts, "WebSessionId"),
+                        ReadString(accounts, "WebSessionUserId"),
+                        ReadString(accounts, "WebSessionTransId"),
+                        ReadString(accounts, "ContextStateJson"),
+                        ReadString(accounts, "UserAgent"));
+
+                    if (!secrets.HasValues)
+                        continue;
+
+                    var key = $"account:{id}";
+                    if (vault.Contains(key))
+                        continue; // A prior startup already copied and verified this account.
+
+                    var json = JsonSerializer.Serialize(secrets);
+                    vault.Set(key, json);
+                    if (!vault.TryGet(key, out var storedJson) || storedJson != json)
+                        throw new InvalidOperationException($"Could not verify vault migration for Schulware account {id}.");
+                }
+            }
+            finally
+            {
+                await db.Database.CloseConnectionAsync();
+            }
+        }
+
+        private static string? ReadString(DbDataReader reader, string column)
+        {
+            var ordinal = reader.GetOrdinal(column);
+            return reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
+        }
+
+        private sealed record LegacySecrets(
+            string? AccessToken,
+            string? RefreshToken,
+            string? WebSessionId,
+            string? WebSessionUserId,
+            string? WebSessionTransId,
+            string? SessionCookiesJson,
+            string? UserAgent)
+        {
+            public bool HasValues => AccessToken is not null || RefreshToken is not null ||
+                WebSessionId is not null || WebSessionUserId is not null ||
+                WebSessionTransId is not null || SessionCookiesJson is not null || UserAgent is not null;
         }
     }
 }
