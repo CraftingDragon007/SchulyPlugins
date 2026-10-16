@@ -9,9 +9,9 @@ DLLs + index built from `main`. Each plugin ships as:
 ## Install
 
 ```sh
-BASE=https://raw.githubusercontent.com/schulydev/SchulyPlugins/repo
+BASE=https://raw.githubusercontent.com/CraftingDragon007/SchulyPlugins/repo
 NAME=Schuly.Plugin.Schulware
-VERSION=2.2.2
+VERSION=2.5.2
 
 # 1. Drop the plugin DLL into the backend's plugins/ folder
 curl -L "$BASE/dll/$NAME-v$VERSION.dll" -o /app/plugins/$NAME.dll
