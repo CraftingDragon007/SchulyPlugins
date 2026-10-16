@@ -23,7 +23,7 @@ namespace Schuly.Plugin.OdaOrg.Data.Migrations
                 table: "Accounts",
                 type: "boolean",
                 nullable: false,
-                defaultValue: false);
+                defaultValue: true);
         }
 
         /// <inheritdoc />
